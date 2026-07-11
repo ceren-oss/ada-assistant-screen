@@ -452,40 +452,136 @@ const TEKLIF_KEY = 'jarvis_teklifler_v1';
 function loadTeklifler(){ try{ return JSON.parse(localStorage.getItem(TEKLIF_KEY))||[]; }catch{ return []; } }
 function saveTeklifler(v){ localStorage.setItem(TEKLIF_KEY, JSON.stringify(v)); }
 const REF_KEY = 'jarvis_ref_data_v1';
-function loadRefData(){ try{ return JSON.parse(localStorage.getItem(REF_KEY))||[]; }catch{ return []; } }
-function saveRefData(v){ localStorage.setItem(REF_KEY, JSON.stringify(v)); }
-function buildRefDataOzet(limit=25){
-  const all=loadRefData();
-  const son=all.slice(-limit);
-  if(!son.length) return 'referans veri yok';
-  return son.map((x,i)=>`${i+1}) ${x.content}`).join('\n');
-}
-function referansDataKaydet(){
-  const raw=val('rRefData');
-  if(!raw || !raw.trim()){ alert('Referans veri alanı boş.'); return; }
-  const all=loadRefData();
-  const seen=new Set(all.map(x=>x.content));
-  let eklenen=0;
+const REF_IMPORT_DONE_KEY = 'jarvis_ref_import_done_v1';
+const REF_TABLE = 'reference_data';
+function loadRefDataLocal(){ try{ return JSON.parse(localStorage.getItem(REF_KEY))||[]; }catch{ return []; } }
+function saveRefDataLocal(v){ localStorage.setItem(REF_KEY, JSON.stringify(v)); }
+function refTagNorm(v){ return String(v||'').trim().toLowerCase(); }
+function refDedupKey(content,tag){ return `${String(content||'').trim()}__${refTagNorm(tag)}`; }
+function parseRefInput(raw,defaultTag=''){
+  let out=[];
+  const dTag=refTagNorm(defaultTag);
   try{
     const p=JSON.parse(raw);
     const arr=Array.isArray(p)? p : [p];
-    arr.forEach(it=>{
-      const content=typeof it==='string' ? it.trim() : JSON.stringify(it);
-      if(!content || seen.has(content)) return;
-      seen.add(content);
-      all.push({id:'r_'+Date.now()+'_'+eklenen,createdAt:Date.now(),content});
-      eklenen++;
-    });
+    out = arr.map(it=>{
+      if(typeof it==='string') return {content:it.trim(),tag:dTag};
+      if(!it || typeof it!=='object') return null;
+      const content = typeof it.content==='string' ? it.content.trim() : JSON.stringify(it);
+      const tag = refTagNorm(it.tag||it.tags||dTag);
+      return {content,tag};
+    }).filter(x=>x && x.content);
   }catch{
-    raw.split('\n').map(s=>s.trim()).filter(Boolean).forEach(content=>{
-      if(seen.has(content)) return;
-      seen.add(content);
-      all.push({id:'r_'+Date.now()+'_'+eklenen,createdAt:Date.now(),content});
-      eklenen++;
-    });
+    out = String(raw||'').split('\n').map(s=>s.trim()).filter(Boolean).map(content=>({content,tag:dTag}));
   }
-  saveRefData(all.slice(-500));
-  alert(`${eklenen} referans kayıt eklendi.`);
+  return out;
+}
+async function getAllRefData(tagFilter=''){
+  const fTag=refTagNorm(tagFilter);
+  if(sb){
+    let q=sb.from(REF_TABLE).select('id,content,tag,created_at,created_by').order('created_at',{ascending:true}).limit(5000);
+    if(fTag) q=q.eq('tag',fTag);
+    const {data,error}=await q;
+    if(!error && Array.isArray(data)){
+      return data.map(x=>({
+        id:x.id,
+        content:String(x.content||''),
+        tag:refTagNorm(x.tag||''),
+        createdAt:x.created_at? new Date(x.created_at).getTime():Date.now(),
+        createdBy:String(x.created_by||'')
+      })).filter(x=>x.content);
+    }
+  }
+  let local=loadRefDataLocal().map(x=>({
+    id:x.id,
+    content:String(x.content||''),
+    tag:refTagNorm(x.tag||''),
+    createdAt:Number(x.createdAt)||Date.now(),
+    createdBy:String(x.createdBy||'')
+  })).filter(x=>x.content);
+  if(fTag) local=local.filter(x=>x.tag===fTag);
+  return local;
+}
+async function addRefRecords(records,{allowLocalFallback=true}={}){
+  const temiz=(records||[]).map(x=>({content:String(x.content||'').trim(),tag:refTagNorm(x.tag||'')})).filter(x=>x.content);
+  if(!temiz.length) return {ok:false,added:0,msg:'Eklenebilir referans bulunamadı.'};
+  if(sb){
+    const {data:all,error:allErr}=await sb.from(REF_TABLE).select('content,tag').order('created_at',{ascending:false}).limit(5000);
+    if(!allErr){
+      const seen=new Set((all||[]).map(x=>refDedupKey(x.content,x.tag)));
+      const nowIso=new Date().toISOString();
+      const createdBy=(CFG.userMail||CFG.userName||'anon').trim();
+      const inserts=[];
+      temiz.forEach(r=>{
+        const key=refDedupKey(r.content,r.tag);
+        if(seen.has(key)) return;
+        seen.add(key);
+        inserts.push({content:r.content,tag:r.tag||null,created_at:nowIso,created_by:createdBy||'anon'});
+      });
+      if(!inserts.length) return {ok:true,added:0,msg:'Yeni referans yok (tekrarlar ayıklandı).'};
+      const {error:insErr}=await sb.from(REF_TABLE).insert(inserts);
+      if(!insErr) return {ok:true,added:inserts.length,msg:`${inserts.length} referans ortak havuza eklendi.`};
+    }
+  }
+  if(!allowLocalFallback) return {ok:false,added:0,msg:'Supabase yazımı başarısız oldu.'};
+  const local=loadRefDataLocal();
+  const seen=new Set(local.map(x=>refDedupKey(x.content,x.tag)));
+  let eklenen=0;
+  temiz.forEach(r=>{
+    const key=refDedupKey(r.content,r.tag);
+    if(seen.has(key)) return;
+    seen.add(key);
+    local.push({id:'r_'+Date.now()+'_'+eklenen,createdAt:Date.now(),createdBy:(CFG.userMail||CFG.userName||'anon'),content:r.content,tag:r.tag||''});
+    eklenen++;
+  });
+  saveRefDataLocal(local.slice(-500));
+  return {ok:true,added:eklenen,msg:`${eklenen} referans yerel hafızaya eklendi.`};
+}
+async function buildRefDataOzet(limit=25,tagFilter=''){
+  const all=await getAllRefData(tagFilter);
+  const son=all.slice(-limit);
+  if(!son.length) return 'referans veri yok';
+  return son.map((x,i)=>`${i+1}) ${x.tag?`[${x.tag}] `:''}${x.content}`).join('\n');
+}
+async function referansDataKaydet(){
+  const raw=val('rRefData');
+  const tag=val('rRefTag');
+  if(!raw || !raw.trim()){ alert('Referans veri alanı boş.'); return; }
+  const res=await addRefRecords(parseRefInput(raw,tag));
+  alert(res.msg);
+}
+function shouldShowRefImportBtn(){
+  return !!sb && localStorage.getItem(REF_IMPORT_DONE_KEY)!=='1' && loadRefDataLocal().length>0;
+}
+async function importLocalRefsOneTime(){
+  if(localStorage.getItem(REF_IMPORT_DONE_KEY)==='1') return {ok:true,msg:'Yerel referans aktarımı zaten tamamlandı.'};
+  const local=loadRefDataLocal();
+  if(!local.length){ localStorage.setItem(REF_IMPORT_DONE_KEY,'1'); return {ok:true,msg:'Aktarılacak yerel referans bulunamadı.'}; }
+  if(!sb) return {ok:false,msg:'Supabase bağlantısı yok; aktarım beklemede.'};
+  const rows=local.map(x=>({content:String(x.content||'').trim(),tag:refTagNorm(x.tag||'')})).filter(x=>x.content);
+  const res=await addRefRecords(rows,{allowLocalFallback:false});
+  if(res.ok) localStorage.setItem(REF_IMPORT_DONE_KEY,'1');
+  return {ok:res.ok,msg:res.ok?`Yerel referans aktarımı tamamlandı (${res.added} yeni kayıt).`:res.msg};
+}
+async function initRefMigrationUI(){
+  const btn=document.getElementById('rImportLocalBtn');
+  const msg=document.getElementById('rRefSyncMsg');
+  if(!btn || !msg) return;
+  if(!shouldShowRefImportBtn()){
+    btn.classList.add('hide');
+    msg.textContent = sb ? 'Referans hafıza ortak havuzdan okunuyor.' : 'Supabase bağlı değil; referanslar yerelde tutulur.';
+    return;
+  }
+  btn.classList.remove('hide');
+  msg.textContent='Yerel referansların bulundu. Ortak havuza tek seferlik aktarım başlatılıyor…';
+  const auto=await importLocalRefsOneTime();
+  msg.textContent=auto.msg;
+  if(auto.ok){ btn.classList.add('hide'); return; }
+  btn.onclick=async()=>{
+    const r=await importLocalRefsOneTime();
+    msg.textContent=r.msg;
+    if(r.ok) btn.classList.add('hide');
+  };
 }
 function kaydetTeklifRaporKaydi({kurum,yetkili,mail,genelToplam,satirlar}){
   const all=loadTeklifler();
@@ -1264,8 +1360,14 @@ VIEWS.rapor = () => {
           </select></div>
         <div class="fld"><label class="fl">Dönem / not</label><input class="inp" id="rDonem" placeholder="örn: 1-7 Temmuz 2026"></div>
         <div class="fld"><label class="fl">Öne çıkarılacak veriler (opsiyonel)</label><textarea class="ta" id="rVeri" placeholder="örn: TED Koleji imzalandı 501.564₺, Roketsan teklifi beklemede..."></textarea></div>
+        <div class="row">
+          <div class="fld"><label class="fl">Referans etiketi (opsiyonel)</label><input class="inp" id="rRefTag" placeholder="örn: okul / fiyat itirazı / curious box"></div>
+          <div class="fld"><label class="fl">Raporda etiket filtresi (opsiyonel)</label><input class="inp" id="rRefFilterTag" placeholder="örn: fiyat itirazı"></div>
+        </div>
         <div class="fld"><label class="fl">Ada referans hafızası (kalıcı)</label><textarea class="ta" id="rRefData" placeholder="Müşteri notları / segment bilgileri / fiyatlama ipuçları / JSON kayıtları..."></textarea></div>
-        <button class="btn ghost wide" onclick="referansDataKaydet()">🧠 Referans veriye ekle</button>
+        <button class="btn ghost wide" onclick="referansDataKaydet()">🧠 Referansı etiketiyle kaydet</button>
+        <button class="btn ghost wide hide" id="rImportLocalBtn">☁️ Yerel referansları ortak havuza aktar (1 kez)</button>
+        <div class="hint" id="rRefSyncMsg"></div>
         <div class="fld"><label class="fl">Teklif JSON kütüphanesi (opsiyonel import)</label><textarea class="ta" id="rDataLib" placeholder='[{"createdAt":1762204800000,"kurum":"TED Koleji","yetkili":"Ayşe","mail":"ayse@ted.com","genelToplam":501564,"urunAdetToplam":240}]'></textarea></div>
         <button class="btn ghost wide" id="rImportBtn">📥 JSON içeri aktar</button>
         <button class="btn wide" onclick="genRapor()">📊 Raporu oluştur</button>
@@ -1279,11 +1381,13 @@ VIEWS.rapor = () => {
         </div>
       </div>
     </div>`;
+  initRefMigrationUI();
 };
 async function genRapor(){
   const tip=val('rTip'); const donem=val('rDonem'); const veri=val('rVeri');
   const libRaw=val('rDataLib');
-  const refOzet=buildRefDataOzet();
+  const refFilterTag=val('rRefFilterTag');
+  const refOzet=await buildRefDataOzet(25,refFilterTag);
   const importBtn=document.getElementById('rImportBtn');
   if(importBtn){
     importBtn.onclick=()=>{
@@ -1297,7 +1401,7 @@ async function genRapor(){
   const sys=`Sen Ada'sın — Miniskop / Keşif Kutusu satış ekibinin asistanısın. Türkçe, kısa ve net bir SATIŞ RAPORU yaz.
 Başlık, dönem, özet paragraf, madde madde önemli gelişmeler, rakamsal özet ve kısa bir aksiyon önerisi içersin.
 Profesyonel ama motive edici bir kapanış cümlesi ekle. Abartma, veriye dayan.`;
-  const u=`Rapor tipi: ${tip}\nDönem: ${donem||'belirtilmedi'}\nSistem metrikleri:\n${metrikOzet}\nReferans hafıza:\n${refOzet}\nÖne çıkan veriler: ${veri||'genel'}`;
+  const u=`Rapor tipi: ${tip}\nDönem: ${donem||'belirtilmedi'}\nSistem metrikleri:\n${metrikOzet}\nReferans filtre etiketi: ${refFilterTag||'yok (tümü)'}\nReferans hafıza:\n${refOzet}\nÖne çıkan veriler: ${veri||'genel'}`;
   const txt=await askClaude(sys,u);
   out.textContent=`${txt}\n\n--- Sistem metrik özeti ---\n${metrikOzet}`;
   document.getElementById('rActs').classList.remove('hide');
