@@ -538,31 +538,22 @@ function geniusReact(kind, extra){
    AI çağrısı — Claude API (artifact içi)
    ============================================================ */
 async function askClaude(system, userMsg){
-  const key = (CFG.claudeKey||'').trim();
-  if(!key){
-    return "⚠️ Claude API anahtarı eksik. Ayarlar > Claude API anahtarı alanını doldurup tekrar dene.";
-  }
   try{
-    const res = await fetch("https://api.anthropic.com/v1/messages",{
+    const res = await fetch("/.netlify/functions/claude",{
       method:"POST",
       headers:{
-        "Content-Type":"application/json",
-        "x-api-key":key,
-        "anthropic-version":"2023-06-01",
-        "anthropic-dangerous-direct-browser-access":"true"
+        "Content-Type":"application/json"
       },
       body:JSON.stringify({
-        model:"claude-sonnet-4-6",
-        max_tokens:1000,
         system:system,
-        messages:[{role:"user",content:userMsg}]
+        userMsg:userMsg
       })
     });
     if(!res.ok){
       let msg = "";
       try{ msg = await res.text(); }catch{}
-      console.error("Claude API error", res.status, msg);
-      return `⚠️ Ada şu an yanıt üretemedi (API ${res.status}). Anahtarını ve bağlantını kontrol et.`;
+      console.error("Claude proxy error", res.status, msg);
+      return `⚠️ Ada şu an yanıt üretemedi (API ${res.status}). Lütfen tekrar dene.`;
     }
     const data = await res.json();
     const txt = (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n").trim();
@@ -1271,8 +1262,8 @@ VIEWS.ayar = () => {
     </div>
     <div class="card card-pad" style="margin-bottom:18px">
       <div class="sec-head"><h2>AI bağlantısı</h2><p>Sohbetin çalışması için Claude API anahtarı gerekir.</p></div>
-      <div class="fld"><label class="fl">Claude API anahtarı</label><input class="inp" id="claudeKey" type="password" value="${escAttr(CFG.claudeKey||'')}" placeholder="sk-ant-..."></div>
-      <div class="hint">Anahtar sadece bu tarayıcıda localStorage içinde saklanır.</div>
+      <div class="fld"><label class="fl">Claude API anahtarı (Netlify ortam değişkeni kullanılıyor)</label><input class="inp" id="claudeKey" type="password" value="${escAttr(CFG.claudeKey||'')}" placeholder="Netlify'da ANTHROPIC_API_KEY olarak ayarla" disabled></div>
+      <div class="hint">Canlı linkte ortak kullanım için anahtar Netlify ortam değişkeninden okunur.</div>
     </div>
     <div class="card card-pad" style="margin-bottom:18px">
       <div class="sec-head"><h2>Bayi portalı adresi</h2></div>
@@ -1289,7 +1280,6 @@ VIEWS.ayar = () => {
 function saveAll(){
   CFG.userName=val('uName'); CFG.userMail=val('uMail');
   CFG.sbUrl=val('sbUrl').trim(); CFG.sbKey=val('sbKey').trim(); CFG.bayiUrl=val('bayiUrl').trim();
-  CFG.claudeKey=val('claudeKey').trim();
   saveCfg();
   saveTpl({teklif:val('tplTeklif'),sozlesme:val('tplSoz')});
   initSb(); renderConn();
