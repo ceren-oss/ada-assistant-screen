@@ -451,6 +451,42 @@ function addDaysISO(days){ const d=new Date(); d.setDate(d.getDate()+days); retu
 const TEKLIF_KEY = 'jarvis_teklifler_v1';
 function loadTeklifler(){ try{ return JSON.parse(localStorage.getItem(TEKLIF_KEY))||[]; }catch{ return []; } }
 function saveTeklifler(v){ localStorage.setItem(TEKLIF_KEY, JSON.stringify(v)); }
+const REF_KEY = 'jarvis_ref_data_v1';
+function loadRefData(){ try{ return JSON.parse(localStorage.getItem(REF_KEY))||[]; }catch{ return []; } }
+function saveRefData(v){ localStorage.setItem(REF_KEY, JSON.stringify(v)); }
+function buildRefDataOzet(limit=25){
+  const all=loadRefData();
+  const son=all.slice(-limit);
+  if(!son.length) return 'referans veri yok';
+  return son.map((x,i)=>`${i+1}) ${x.content}`).join('\n');
+}
+function referansDataKaydet(){
+  const raw=val('rRefData');
+  if(!raw || !raw.trim()){ alert('Referans veri alanı boş.'); return; }
+  const all=loadRefData();
+  const seen=new Set(all.map(x=>x.content));
+  let eklenen=0;
+  try{
+    const p=JSON.parse(raw);
+    const arr=Array.isArray(p)? p : [p];
+    arr.forEach(it=>{
+      const content=typeof it==='string' ? it.trim() : JSON.stringify(it);
+      if(!content || seen.has(content)) return;
+      seen.add(content);
+      all.push({id:'r_'+Date.now()+'_'+eklenen,createdAt:Date.now(),content});
+      eklenen++;
+    });
+  }catch{
+    raw.split('\n').map(s=>s.trim()).filter(Boolean).forEach(content=>{
+      if(seen.has(content)) return;
+      seen.add(content);
+      all.push({id:'r_'+Date.now()+'_'+eklenen,createdAt:Date.now(),content});
+      eklenen++;
+    });
+  }
+  saveRefData(all.slice(-500));
+  alert(`${eklenen} referans kayıt eklendi.`);
+}
 function kaydetTeklifRaporKaydi({kurum,yetkili,mail,genelToplam,satirlar}){
   const all=loadTeklifler();
   const now=Date.now();
@@ -475,11 +511,43 @@ function raporDonemGun(tip,donem){
   if((tip||'').toLowerCase().includes('haftalık')) return 7;
   return null;
 }
+function yuzdeDegisim(yeni,eski){
+  if(!eski) return null;
+  return Math.round(((yeni-eski)/eski)*100);
+}
+function importTeklifKutuphane(raw){
+  let arr;
+  try{ arr=JSON.parse(raw); }catch{ return {ok:false,msg:'JSON formatı hatalı.'}; }
+  if(!Array.isArray(arr)) return {ok:false,msg:'JSON bir dizi olmalı.'};
+  const mevcut=loadTeklifler();
+  const seen=new Set(mevcut.map(x=>`${x.offerKey||''}|${x.createdAt||0}`));
+  let eklenen=0;
+  arr.forEach((r,i)=>{
+    if(!r || typeof r!=='object') return;
+    const createdAt=Number(r.createdAt)||Date.now()-i;
+    const kurum=String(r.kurum||'').trim();
+    const yetkili=String(r.yetkili||'').trim();
+    const mail=String(r.mail||'').trim();
+    const genelToplam=Number(r.genelToplam)||0;
+    const urunAdetToplam=Number(r.urunAdetToplam)||0;
+    const offerKey=[kurum,mail,genelToplam].join('|');
+    const key=`${offerKey}|${createdAt}`;
+    if(seen.has(key)) return;
+    seen.add(key);
+    mevcut.unshift({id:'t_'+createdAt+'_'+i,createdAt,offerKey,kurum,yetkili,mail,genelToplam,urunAdetToplam});
+    eklenen++;
+  });
+  saveTeklifler(mevcut.slice(0,300));
+  return {ok:true,msg:`${eklenen} kayıt içeri aktarıldı.`};
+}
 function buildRaporMetrikOzeti(tip,donem){
   const gun=raporDonemGun(tip,donem);
   const now=Date.now();
-  const altSinir=gun? now-gun*24*60*60*1000 : 0;
-  const teklifler=loadTeklifler().filter(t=>!gun || (t.createdAt||0)>=altSinir);
+  const sure=gun? gun*24*60*60*1000 : null;
+  const altSinir=sure? now-sure : 0;
+  const oncekiAlt=sure? now-(sure*2) : 0;
+  const teklifler=loadTeklifler().filter(t=>!sure || (t.createdAt||0)>=altSinir);
+  const oncekiTeklifler=loadTeklifler().filter(t=>sure && (t.createdAt||0)<altSinir && (t.createdAt||0)>=oncekiAlt);
   const teklifSayisi=teklifler.length;
   const toplamTutar=teklifler.reduce((s,t)=>s+(Number(t.genelToplam)||0),0);
   const ortalamaTutar=teklifSayisi? Math.round(toplamTutar/teklifSayisi):0;
@@ -489,6 +557,10 @@ function buildRaporMetrikOzeti(tip,donem){
   const bugun=todayISO();
   const gecikmisTakip=takip.filter(x=>x.status!=='done' && (x.dueDate||'')<bugun).length;
   const enBuyuk=[...teklifler].sort((a,b)=>(b.genelToplam||0)-(a.genelToplam||0))[0];
+  const oncekiTeklifSayisi=oncekiTeklifler.length;
+  const oncekiToplamTutar=oncekiTeklifler.reduce((s,t)=>s+(Number(t.genelToplam)||0),0);
+  const teklifDegisim=yuzdeDegisim(teklifSayisi,oncekiTeklifSayisi);
+  const ciroDegisim=yuzdeDegisim(toplamTutar,oncekiToplamTutar);
   const satirlar=[
     `İncelenen dönem (gün): ${gun||'tümü'}`,
     `Teklif sayısı: ${teklifSayisi}`,
@@ -497,7 +569,11 @@ function buildRaporMetrikOzeti(tip,donem){
     `Toplam ürün adedi: ${toplamUrunAdedi}`,
     `Açık takip sayısı: ${acikTakip}`,
     `Gecikmiş takip sayısı: ${gecikmisTakip}`,
-    `En yüksek teklif: ${enBuyuk ? `${enBuyuk.kurum||'Bilinmiyor'} (${TL(enBuyuk.genelToplam||0)})` : 'yok'}`
+    `En yüksek teklif: ${enBuyuk ? `${enBuyuk.kurum||'Bilinmiyor'} (${TL(enBuyuk.genelToplam||0)})` : 'yok'}`,
+    `Önceki eş dönem teklif sayısı: ${oncekiTeklifSayisi}`,
+    `Önceki eş dönem ciro: ${TL(oncekiToplamTutar)}`,
+    `Teklif sayısı değişim: ${teklifDegisim===null ? 'hesaplanamadı' : `%${teklifDegisim}`}`,
+    `Ciro değişim: ${ciroDegisim===null ? 'hesaplanamadı' : `%${ciroDegisim}`}`
   ];
   return satirlar.join('\n');
 }
@@ -1188,6 +1264,10 @@ VIEWS.rapor = () => {
           </select></div>
         <div class="fld"><label class="fl">Dönem / not</label><input class="inp" id="rDonem" placeholder="örn: 1-7 Temmuz 2026"></div>
         <div class="fld"><label class="fl">Öne çıkarılacak veriler (opsiyonel)</label><textarea class="ta" id="rVeri" placeholder="örn: TED Koleji imzalandı 501.564₺, Roketsan teklifi beklemede..."></textarea></div>
+        <div class="fld"><label class="fl">Ada referans hafızası (kalıcı)</label><textarea class="ta" id="rRefData" placeholder="Müşteri notları / segment bilgileri / fiyatlama ipuçları / JSON kayıtları..."></textarea></div>
+        <button class="btn ghost wide" onclick="referansDataKaydet()">🧠 Referans veriye ekle</button>
+        <div class="fld"><label class="fl">Teklif JSON kütüphanesi (opsiyonel import)</label><textarea class="ta" id="rDataLib" placeholder='[{"createdAt":1762204800000,"kurum":"TED Koleji","yetkili":"Ayşe","mail":"ayse@ted.com","genelToplam":501564,"urunAdetToplam":240}]'></textarea></div>
+        <button class="btn ghost wide" id="rImportBtn">📥 JSON içeri aktar</button>
         <button class="btn wide" onclick="genRapor()">📊 Raporu oluştur</button>
       </div>
       <div class="card card-pad">
@@ -1202,12 +1282,22 @@ VIEWS.rapor = () => {
 };
 async function genRapor(){
   const tip=val('rTip'); const donem=val('rDonem'); const veri=val('rVeri');
+  const libRaw=val('rDataLib');
+  const refOzet=buildRefDataOzet();
+  const importBtn=document.getElementById('rImportBtn');
+  if(importBtn){
+    importBtn.onclick=()=>{
+      const r=importTeklifKutuphane(val('rDataLib'));
+      alert(r.msg);
+    };
+  }
+  if(libRaw){ importTeklifKutuphane(libRaw); }
   const metrikOzet=buildRaporMetrikOzeti(tip,donem);
   const out=document.getElementById('rOut'); out.classList.remove('empty'); out.textContent='Ada raporu hazırlıyor…';
   const sys=`Sen Ada'sın — Miniskop / Keşif Kutusu satış ekibinin asistanısın. Türkçe, kısa ve net bir SATIŞ RAPORU yaz.
 Başlık, dönem, özet paragraf, madde madde önemli gelişmeler, rakamsal özet ve kısa bir aksiyon önerisi içersin.
 Profesyonel ama motive edici bir kapanış cümlesi ekle. Abartma, veriye dayan.`;
-  const u=`Rapor tipi: ${tip}\nDönem: ${donem||'belirtilmedi'}\nSistem metrikleri:\n${metrikOzet}\nÖne çıkan veriler: ${veri||'genel'}`;
+  const u=`Rapor tipi: ${tip}\nDönem: ${donem||'belirtilmedi'}\nSistem metrikleri:\n${metrikOzet}\nReferans hafıza:\n${refOzet}\nÖne çıkan veriler: ${veri||'genel'}`;
   const txt=await askClaude(sys,u);
   out.textContent=`${txt}\n\n--- Sistem metrik özeti ---\n${metrikOzet}`;
   document.getElementById('rActs').classList.remove('hide');
