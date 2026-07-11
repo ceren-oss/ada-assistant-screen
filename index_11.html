@@ -443,6 +443,132 @@ function savePrices(p){ localStorage.setItem(PRICE_KEY, JSON.stringify(p)); }
 const TPL_KEY = 'jarvis_tpl_v1';
 function loadTpl(){ try{ return JSON.parse(localStorage.getItem(TPL_KEY))||{}; }catch{ return {}; } }
 function saveTpl(t){ localStorage.setItem(TPL_KEY, JSON.stringify(t)); }
+const FOLLOWUP_KEY = 'jarvis_followups_v1';
+function loadFollowups(){ try{ return JSON.parse(localStorage.getItem(FOLLOWUP_KEY))||[]; }catch{ return []; } }
+function saveFollowups(v){ localStorage.setItem(FOLLOWUP_KEY, JSON.stringify(v)); }
+function todayISO(){ return new Date().toISOString().slice(0,10); }
+function addDaysISO(days){ const d=new Date(); d.setDate(d.getDate()+days); return d.toISOString().slice(0,10); }
+const TEKLIF_KEY = 'jarvis_teklifler_v1';
+function loadTeklifler(){ try{ return JSON.parse(localStorage.getItem(TEKLIF_KEY))||[]; }catch{ return []; } }
+function saveTeklifler(v){ localStorage.setItem(TEKLIF_KEY, JSON.stringify(v)); }
+function kaydetTeklifRaporKaydi({kurum,yetkili,mail,genelToplam,satirlar}){
+  const all=loadTeklifler();
+  const now=Date.now();
+  const offerKey=[kurum||'',mail||'',genelToplam||0].join('|');
+  const dup=all.find(x=>x.offerKey===offerKey && (now-(x.createdAt||0))<10*60*1000);
+  if(dup) return;
+  const urunAdetToplam=(satirlar||[]).reduce((s,x)=>s+(Number(x.adet)||0),0);
+  all.unshift({
+    id:'t_'+now, createdAt:now, offerKey,
+    kurum:kurum||'', yetkili:yetkili||'', mail:mail||'',
+    genelToplam:Number(genelToplam)||0, urunAdetToplam
+  });
+  saveTeklifler(all.slice(0,300));
+}
+function raporDonemGun(tip,donem){
+  const d=(donem||'').toLowerCase();
+  const mGun=d.match(/(\d{1,3})\s*gün/);
+  if(mGun) return Math.max(1,Number(mGun[1])||0);
+  const mAralik=d.match(/(\d{1,2})\s*-\s*(\d{1,2})/);
+  if(mAralik) return Math.max(1,(Number(mAralik[2])||0)-(Number(mAralik[1])||0)+1);
+  if((tip||'').toLowerCase().includes('aylık')) return 30;
+  if((tip||'').toLowerCase().includes('haftalık')) return 7;
+  return null;
+}
+function buildRaporMetrikOzeti(tip,donem){
+  const gun=raporDonemGun(tip,donem);
+  const now=Date.now();
+  const altSinir=gun? now-gun*24*60*60*1000 : 0;
+  const teklifler=loadTeklifler().filter(t=>!gun || (t.createdAt||0)>=altSinir);
+  const teklifSayisi=teklifler.length;
+  const toplamTutar=teklifler.reduce((s,t)=>s+(Number(t.genelToplam)||0),0);
+  const ortalamaTutar=teklifSayisi? Math.round(toplamTutar/teklifSayisi):0;
+  const toplamUrunAdedi=teklifler.reduce((s,t)=>s+(Number(t.urunAdetToplam)||0),0);
+  const takip=loadFollowups();
+  const acikTakip=takip.filter(x=>x.status!=='done').length;
+  const bugun=todayISO();
+  const gecikmisTakip=takip.filter(x=>x.status!=='done' && (x.dueDate||'')<bugun).length;
+  const enBuyuk=[...teklifler].sort((a,b)=>(b.genelToplam||0)-(a.genelToplam||0))[0];
+  const satirlar=[
+    `İncelenen dönem (gün): ${gun||'tümü'}`,
+    `Teklif sayısı: ${teklifSayisi}`,
+    `Toplam teklif tutarı: ${TL(toplamTutar)}`,
+    `Ortalama teklif tutarı: ${TL(ortalamaTutar)}`,
+    `Toplam ürün adedi: ${toplamUrunAdedi}`,
+    `Açık takip sayısı: ${acikTakip}`,
+    `Gecikmiş takip sayısı: ${gecikmisTakip}`,
+    `En yüksek teklif: ${enBuyuk ? `${enBuyuk.kurum||'Bilinmiyor'} (${TL(enBuyuk.genelToplam||0)})` : 'yok'}`
+  ];
+  return satirlar.join('\n');
+}
+function fmtDateTR(iso){
+  const d=new Date(iso+'T00:00:00');
+  return d.toLocaleDateString('tr-TR',{day:'2-digit',month:'2-digit'});
+}
+function createFollowupsForTeklif({kurum,yetkili,mail,genelToplam}){
+  const all=loadFollowups();
+  const now=Date.now();
+  const offerKey=[kurum||'',mail||'',genelToplam||0].join('|');
+  const dup=all.find(x=>x.offerKey===offerKey && (now-(x.createdAt||0))<10*60*1000);
+  if(dup) return;
+  const who=(kurum||yetkili||'Müşteri').trim();
+  const base={who,mail:mail||'',genelToplam:genelToplam||0,offerKey,createdAt:now,status:'pending'};
+  all.push(
+    {...base,id:'f_'+(now)+'_1',title:'Teklif sonrası ilk temas',dueDate:addDaysISO(1)},
+    {...base,id:'f_'+(now)+'_3',title:'Karar durumu takibi',dueDate:addDaysISO(3)},
+    {...base,id:'f_'+(now)+'_7',title:'Son takip / kapanış',dueDate:addDaysISO(7)}
+  );
+  saveFollowups(all);
+}
+function dueFollowups(){
+  const t=todayISO();
+  return loadFollowups()
+    .filter(x=>x.status!=='done' && x.dueDate<=t)
+    .sort((a,b)=>String(a.dueDate).localeCompare(String(b.dueDate)));
+}
+function setFollowupStatus(id,status){
+  const all=loadFollowups();
+  const i=all.findIndex(x=>x.id===id);
+  if(i<0) return;
+  all[i].status=status;
+  all[i].updatedAt=Date.now();
+  saveFollowups(all);
+}
+function snoozeFollowup(id,days=1){
+  const all=loadFollowups();
+  const i=all.findIndex(x=>x.id===id);
+  if(i<0) return;
+  const d=new Date((all[i].dueDate||todayISO())+'T00:00:00');
+  d.setDate(d.getDate()+days);
+  all[i].dueDate=d.toISOString().slice(0,10);
+  all[i].updatedAt=Date.now();
+  saveFollowups(all);
+}
+function followupDone(id){ setFollowupStatus(id,'done'); if(CURRENT==='home') VIEWS.home(); }
+function followupSnooze(id){ snoozeFollowup(id,1); if(CURRENT==='home') VIEWS.home(); }
+function renderFollowupCard(){
+  const rows=dueFollowups();
+  if(!rows.length){
+    return `<div class="card card-pad" style="margin-top:14px">
+      <div class="sec-head"><h2 style="font-size:16px">Bugün takip</h2><p>Bekleyen takip yok.</p></div>
+    </div>`;
+  }
+  return `<div class="card card-pad" style="margin-top:14px">
+    <div class="sec-head"><h2 style="font-size:16px">Bugün takip (${rows.length})</h2><p>Vadesi gelen teklif takipleri</p></div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${rows.map(r=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--white);border:1px solid var(--line);border-radius:10px;padding:10px">
+        <div style="min-width:0">
+          <div style="font-weight:700;font-size:13px">${escapeHtml(r.who)} — ${escapeHtml(r.title)}</div>
+          <div class="hint" style="margin:2px 0 0">Vade: ${fmtDateTR(r.dueDate)}${r.genelToplam?` · Teklif: ${TL(r.genelToplam)}`:''}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="btn ghost sm" onclick="followupSnooze('${escAttr(r.id)}')">+1 gün</button>
+          <button class="btn sm" onclick="followupDone('${escAttr(r.id)}')">Tamamlandı</button>
+        </div>
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
 
 /* ---- Para format ---- */
 const TL = n => new Intl.NumberFormat('tr-TR',{style:'currency',currency:'TRY',maximumFractionDigits:0}).format(n||0);
@@ -673,6 +799,7 @@ VIEWS.home = () => {
         <div class="hero-stat"><div class="n">4</div><div class="l">Bekleyen sipariş</div></div>
         <div class="hero-stat"><div class="n">3</div><div class="l">Bayi talebi</div></div>
       </div>
+      ${renderFollowupCard()}
     </div>
     ${needSetup?`<div class="banner" style="max-width:760px;margin:0 auto 20px">
       <div>⚙️ <b>Merhaba!</b> Bana adını ve Gmail'ini söylersen seni ismiyle karşılarım, mailleri de senin hesabından açarım.</div>
@@ -824,6 +951,8 @@ async function genTeklif(){
   const subj=`${kurum} — Keşif Kutusu Fiyat Teklifi`;
   document.getElementById('tMailBtn').onclick=()=>window.open(gmailCompose(mail,subj,mailTxt),'_blank');
   document.getElementById('tPdfBtn').onclick=()=>printHtmlDoc('Fiyat Teklifi', teklifHtml);
+  createFollowupsForTeklif({kurum,yetkili,mail,genelToplam});
+  kaydetTeklifRaporKaydi({kurum,yetkili,mail,genelToplam,satirlar});
   geniusReact('teklif');
 }
 function buildTeklifHtml(d){
@@ -1073,15 +1202,16 @@ VIEWS.rapor = () => {
 };
 async function genRapor(){
   const tip=val('rTip'); const donem=val('rDonem'); const veri=val('rVeri');
+  const metrikOzet=buildRaporMetrikOzeti(tip,donem);
   const out=document.getElementById('rOut'); out.classList.remove('empty'); out.textContent='Ada raporu hazırlıyor…';
   const sys=`Sen Ada'sın — Miniskop / Keşif Kutusu satış ekibinin asistanısın. Türkçe, kısa ve net bir SATIŞ RAPORU yaz.
 Başlık, dönem, özet paragraf, madde madde önemli gelişmeler, rakamsal özet ve kısa bir aksiyon önerisi içersin.
 Profesyonel ama motive edici bir kapanış cümlesi ekle. Abartma, veriye dayan.`;
-  const u=`Rapor tipi: ${tip}\nDönem: ${donem||'belirtilmedi'}\nÖne çıkan veriler: ${veri||'genel'}`;
+  const u=`Rapor tipi: ${tip}\nDönem: ${donem||'belirtilmedi'}\nSistem metrikleri:\n${metrikOzet}\nÖne çıkan veriler: ${veri||'genel'}`;
   const txt=await askClaude(sys,u);
-  out.textContent=txt;
+  out.textContent=`${txt}\n\n--- Sistem metrik özeti ---\n${metrikOzet}`;
   document.getElementById('rActs').classList.remove('hide');
-  document.getElementById('rPdfBtn').onclick=()=>printHtmlDoc(tip, `<div style="white-space:pre-wrap;font-size:13px;line-height:1.7">${escapeHtml(txt)}</div>`);
+  document.getElementById('rPdfBtn').onclick=()=>printHtmlDoc(tip, `<div style="white-space:pre-wrap;font-size:13px;line-height:1.7">${escapeHtml(`${txt}\n\n--- Sistem metrik özeti ---\n${metrikOzet}`)}</div>`);
   geniusReact('rapor');
 }
 
