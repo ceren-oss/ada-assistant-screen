@@ -407,6 +407,7 @@ function kdvHesap(birimFiyat, adet){
 }
 
 const CFG_KEY = 'jarvis_cfg_v1';
+const SHARED_CFG_ENDPOINT = '/.netlify/functions/public-config';
 let CFG = loadCfg();
 let sb = null;
 let CURRENT = 'home';
@@ -416,6 +417,21 @@ function loadCfg(){
   try{ return JSON.parse(localStorage.getItem(CFG_KEY)) || {}; }catch{ return {}; }
 }
 function saveCfg(){ localStorage.setItem(CFG_KEY, JSON.stringify(CFG)); }
+async function hydrateSharedCfg(){
+  if(CFG.sbUrl && CFG.sbKey) return;
+  try{
+    const r = await fetch(SHARED_CFG_ENDPOINT,{cache:'no-store'});
+    if(!r.ok) return;
+    const d = await r.json();
+    const sbUrl = String(d.sbUrl||'').trim();
+    const sbKey = String(d.sbKey||'').trim();
+    if(sbUrl && sbKey){
+      CFG.sbUrl = sbUrl;
+      CFG.sbKey = sbKey;
+      saveCfg();
+    }
+  }catch(e){}
+}
 function initSb(){
   if(CFG.sbUrl && CFG.sbKey && window.supabase){
     try{ sb = window.supabase.createClient(CFG.sbUrl, CFG.sbKey); return true; }
@@ -1675,8 +1691,11 @@ function hideSplash(){ const s=document.getElementById('splash'); if(s) s.classL
 })();
 
 /* ---- boot ---- */
-initSb();
-go('home');
+(async function boot(){
+  await hydrateSharedCfg();
+  initSb();
+  go('home');
+})();
 </script>
 </body>
 </html>
