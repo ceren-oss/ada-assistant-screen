@@ -1366,6 +1366,9 @@ function _buildSeason(){
   const y=new Date().getFullYear();
   return `${y}-${y+1}`;
 }
+function _newPreOrderId(){
+  return `ON-${Math.floor(100000 + Math.random()*900000)}`;
+}
 async function _resolveDealerStrict(bayiRaw){
   const key=_normKey(bayiRaw);
   const {data,error}=await sb.from('dealers').select('id,name,slug,address').limit(1000);
@@ -1414,17 +1417,25 @@ async function addOnSiparis(){
       if(teslim){ noteParts.push(`Teslim: ${teslim}`); }
       noteParts.push('TEST');
       const note=noteParts.filter(Boolean).join(' | ');
-      const {data:preOrder,error:preOrderErr}=await sb.from('pre_orders')
-        .insert([{
-          dealer_id:dealer.id,
-          school_name:dealer.name||bayi,
-          season:_buildSeason(),
-          status:_mapOnSiparisStatus(durum),
-          note,
-          address:dealer.address||null,
-        }])
-        .select('id')
-        .single();
+      let preOrder=null, preOrderErr=null;
+      for(let i=0;i<5;i++){
+        const tryId=_newPreOrderId();
+        const res=await sb.from('pre_orders')
+          .insert([{
+            id:tryId,
+            dealer_id:dealer.id,
+            school_name:dealer.name||bayi,
+            season:_buildSeason(),
+            status:_mapOnSiparisStatus(durum),
+            note,
+            address:dealer.address||null,
+          }])
+          .select('id')
+          .single();
+        if(!res.error){ preOrder=res.data; preOrderErr=null; break; }
+        preOrderErr=res.error;
+        if(String(res.error?.code||'')!=='23505'){ break; } // unique id çakışması değilse dur
+      }
       if(preOrderErr){ throw preOrderErr; }
       const preOrderId=preOrder?.id;
       if(!preOrderId){ throw new Error('pre_orders kaydı oluşturuldu ama id dönmedi.'); }
