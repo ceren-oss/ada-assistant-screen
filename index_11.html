@@ -1303,15 +1303,15 @@ function buildSozlesmeHtml(d){
 
 /* ---------- ÖN SİPARİŞ (bayi portalı) ---------- */
 VIEWS.onsiparis = () => {
-  const prices=loadPrices();
   C().innerHTML=`
     <div class="grid2">
       <div class="card card-pad">
         <div class="sec-head"><h2>Yeni ön sipariş</h2><p>Bayi portalına ekle, depoya düşsün</p></div>
-        <div class="fld"><label class="fl">Bayi / kurum</label><input class="inp" id="oBayi" placeholder="Anadolu Kırtasiye — Kadıköy"></div>
+        <div class="fld"><label class="fl">Bayi / kurum</label>
+          <select class="sel" id="oDealer"><option value="">Bayiler yükleniyor…</option></select></div>
         <div class="row">
           <div class="fld"><label class="fl">Ürün</label>
-            <select class="sel" id="oUrun">${prices.map((p,i)=>`<option value="${i}">${p.ad}</option>`).join('')}</select></div>
+            <select class="sel" id="oProduct"><option value="">Ürünler yükleniyor…</option></select></div>
           <div class="fld"><label class="fl">Adet</label><input class="inp" id="oAdet" type="number" value="50"></div>
         </div>
         <div class="row">
@@ -1332,11 +1332,13 @@ VIEWS.onsiparis = () => {
       </div>
     </div>`;
   renderOnList();
+  setTimeout(()=>loadOnSiparisLookups(),0);
 };
 let onSiparisler=[
   {bayi:'Bahar Kırtasiye',urun:'Etkinlik Seti (16\'lı)',adet:60,durum:'Onaylandı'},
   {bayi:'Minik Adımlar Anaokulu',urun:'STEM Seti (8\'li)',adet:35,durum:'Ön sipariş'},
 ];
+let onSiparisLookups={dealers:[],products:[]};
 function renderOnList(){
   const el=document.getElementById('oList'); if(!el) return;
   if(!onSiparisler.length){ el.innerHTML='<div class="hint">Henüz ön sipariş yok.</div>'; return; }
@@ -1344,18 +1346,43 @@ function renderOnList(){
     <tbody>${onSiparisler.map(o=>`<tr><td>${escapeHtml(o.bayi)}</td><td>${escapeHtml(o.urun)}</td><td>${o.adet}</td>
     <td><span class="tag ${o.durum==='Onaylandı'?'won':o.durum==='Üretimde'?'wait':'new'}">${o.durum}</span></td></tr>`).join('')}</tbody></table>`;
 }
-function _normKey(v){
-  const map={'ç':'c','ğ':'g','ı':'i','i̇':'i','ö':'o','ş':'s','ü':'u'};
-  return String(v||'')
-    .trim()
-    .toLocaleLowerCase('tr-TR')
-    .replace(/[çğıi̇öşü]/g,m=>map[m]||m)
-    .replace(/[^a-z0-9]+/g,' ')
-    .trim();
-}
-function _extractSize(v){
-  const m=String(v||'').match(/(\d{1,3})/);
-  return m?+m[1]:null;
+async function loadOnSiparisLookups(){
+  const dealerSel=document.getElementById('oDealer');
+  const productSel=document.getElementById('oProduct');
+  const msgEl=document.getElementById('oMsg');
+  if(!dealerSel || !productSel) return;
+  if(!sb){
+    const products=loadPrices().map((p,i)=>({id:`local-${i}`,name:p.ad,default_price:Number(p.fiyat||0),isLocal:true}));
+    onSiparisLookups={dealers:[],products};
+    dealerSel.innerHTML='<option value="">Supabase bağlantısı gerekli</option>';
+    dealerSel.disabled=true;
+    productSel.innerHTML='<option value="">Ürün seç</option>'+products.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+    productSel.disabled=false;
+    if(msgEl) msgEl.textContent='⚠️ Canlı ön sipariş için Supabase bağlantısı gerekli.';
+    return;
+  }
+  try{
+    const [dRes,pRes]=await Promise.all([
+      sb.from('dealers').select('id,name,active,address').order('active',{ascending:false}).order('name',{ascending:true}).limit(1000),
+      sb.from('products').select('id,name,box_size,default_price').order('name',{ascending:true}).limit(1000),
+    ]);
+    if(dRes.error) throw dRes.error;
+    if(pRes.error) throw pRes.error;
+    const dealers=(dRes.data||[]).map(d=>({...d,name:String(d.name||'').trim()})).filter(d=>d.id && d.name);
+    const products=(pRes.data||[]).map(p=>({...p,name:String(p.name||'').trim()})).filter(p=>p.id && p.name);
+    onSiparisLookups={dealers,products};
+    dealerSel.innerHTML='<option value="">Bayi seç</option>'+dealers.map(d=>`<option value="${d.id}">${escapeHtml(d.name)}${d.active===false?' (pasif)':''}</option>`).join('');
+    dealerSel.disabled=!dealers.length;
+    productSel.innerHTML='<option value="">Ürün seç</option>'+products.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}${p.box_size?` (${p.box_size})`:''}</option>`).join('');
+    productSel.disabled=!products.length;
+    if(msgEl) msgEl.textContent=dealers.length&&products.length?'':'⚠️ Bayi/ürün listesi boş.';
+  }catch(e){
+    dealerSel.innerHTML='<option value="">Bayi yüklenemedi</option>';
+    productSel.innerHTML='<option value="">Ürün yüklenemedi</option>';
+    dealerSel.disabled=true;
+    productSel.disabled=true;
+    if(msgEl) msgEl.textContent=`⚠️ Bayi/ürün listeleri yüklenemedi: ${e?.message||e}`;
+  }
 }
 function _mapOnSiparisStatus(v){
   if(v==='Onaylandı') return 'onaylandi';
@@ -1369,50 +1396,24 @@ function _buildSeason(){
 function _newPreOrderId(){
   return `ON-${Math.floor(100000 + Math.random()*900000)}`;
 }
-async function _resolveDealerStrict(bayiRaw){
-  const key=_normKey(bayiRaw);
-  const {data,error}=await sb.from('dealers').select('id,name,slug,address').limit(1000);
-  if(error) throw error;
-  const hit=(data||[]).find(d=>_normKey(d.name)===key || _normKey(d.slug)===key);
-  return hit||null;
-}
-async function _resolveProductStrict(urunRaw){
-  const key=_normKey(urunRaw);
-  const size=_extractSize(urunRaw);
-  const {data,error}=await sb.from('products').select('id,name,box_size,default_price').limit(500);
-  if(error) throw error;
-  const exact=(data||[]).find(p=>_normKey(p.name)===key);
-  if(exact) return exact;
-  if(size===null) return null;
-  const bySize=(data||[]).filter(p=>Number(p.box_size)===size);
-  return bySize.length===1?bySize[0]:null;
-}
 async function addOnSiparis(){
   const msgEl=document.getElementById('oMsg');
-  const prices=loadPrices();
-  const bayi=val('oBayi').trim();
-  const urunObj=prices[+val('oUrun')]||{};
-  const urun=urunObj.ad||'';
+  const dealerId=val('oDealer');
+  const productId=val('oProduct');
+  const dealer=onSiparisLookups.dealers.find(d=>String(d.id)===String(dealerId))||null;
+  const product=onSiparisLookups.products.find(p=>String(p.id)===String(productId))||null;
+  const bayi=dealer?.name||'';
+  const urun=product?.name||'';
   const adet=Math.max(0,+val('oAdet')||0);
   const durum=val('oDurum');
   const teslim=val('oTarih');
   const notRaw=val('oNot').trim();
-  if(!bayi){ msgEl.textContent='⚠️ Bayi adı zorunlu.'; return; }
+  if(!dealer){ msgEl.textContent='⚠️ Bayi seçimi zorunlu.'; return; }
   if(!urun){ msgEl.textContent='⚠️ Ürün seçimi zorunlu.'; return; }
   if(adet<=0){ msgEl.textContent='⚠️ Adet 0’dan büyük olmalı.'; return; }
   let savedToSupabase=false;
   if(sb){
     try{
-      const dealer=await _resolveDealerStrict(bayi);
-      if(!dealer){
-        msgEl.textContent='⚠️ Bu isimde bir bayi bulunamadı, ön sipariş kaydedilemedi.';
-        return;
-      }
-      const product=await _resolveProductStrict(urun);
-      if(!product){
-        msgEl.textContent='⚠️ Seçilen ürün ürün kataloğunda bulunamadı, ön sipariş kaydedilemedi.';
-        return;
-      }
       const noteParts=[notRaw];
       if(teslim){ noteParts.push(`Teslim: ${teslim}`); }
       noteParts.push('TEST');
@@ -1443,7 +1444,7 @@ async function addOnSiparis(){
         pre_order_id:preOrderId,
         product_id:product.id,
         qty:adet,
-        unit_price:Number(urunObj.fiyat||product.default_price||0),
+        unit_price:Number(product.default_price||0),
       }]);
       if(itemErr){
         const {error:rollbackErr}=await sb.from('pre_orders').delete().eq('id',preOrderId);
@@ -1461,7 +1462,8 @@ async function addOnSiparis(){
   onSiparisler.unshift({bayi,urun,adet,durum});
   renderOnList();
   msgEl.textContent='✓ Kaydedildi'+(savedToSupabase?' (Supabase: pre_orders + pre_order_items)':' (oturum)');
-  document.getElementById('oBayi').value='';
+  document.getElementById('oDealer').value='';
+  document.getElementById('oProduct').value='';
   geniusReact('onsiparis');
 }
 
