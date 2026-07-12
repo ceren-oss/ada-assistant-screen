@@ -1491,14 +1491,82 @@ async function mLoad(t){
   const box=document.getElementById('mBox');
   if(sb){
     box.innerHTML='<div class="hint">Supabase\'den çekiliyor…</div>';
-    const table = t==='mus'?'musteriler':'siparisler';
-    const {data,error}=await sb.from(table).select('*').limit(50);
-    if(error){ box.innerHTML=`<div class="hint">⚠️ "${table}" tablosu bulunamadı. Ayarlar'da tablo adını kontrol et ya da Supabase'de oluştur.</div>`; return; }
-    if(!data||!data.length){ box.innerHTML='<div class="hint">Kayıt yok. İlk kaydı Supabase\'den ekleyebilirsin.</div>'; return; }
-    const cols=Object.keys(data[0]).filter(c=>c!=='id');
-    box.innerHTML=`<table class="tbl"><thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
-      <tbody>${data.map(r=>`<tr>${cols.map(c=>`<td>${escapeHtml(String(r[c]??''))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
-    return;
+    const renderTbl=(cols,rows)=>`<table class="tbl"><thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${escapeHtml(String(r[c]??''))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    try{
+      if(t==='mus'){
+        const {data,error}=await sb.from('dealers')
+          .select('name,contact,city,phone,email,active,created_at')
+          .order('created_at',{ascending:false})
+          .limit(100);
+        if(error){ throw error; }
+        if(!data||!data.length){ box.innerHTML='<div class="hint">Bayi kaydı bulunamadı.</div>'; return; }
+        const rows=data.map(d=>({
+          'Kurum': d.name||'-',
+          'Yetkili': d.contact||'-',
+          'Şehir': d.city||'-',
+          'Telefon': d.phone||'-',
+          'E-posta': d.email||'-',
+          'Durum': d.active===true?'Aktif':(d.active===false?'Pasif':'-'),
+        }));
+        const cols=['Kurum','Yetkili','Şehir','Telefon','E-posta','Durum'];
+        box.innerHTML=renderTbl(cols,rows);
+        return;
+      }
+      const {data:orders,error:ordersErr}=await sb.from('orders')
+        .select('id,date,season,status,total,school_name,dealer_id,created_at')
+        .order('created_at',{ascending:false})
+        .limit(50);
+      if(ordersErr){ throw ordersErr; }
+      if(!orders||!orders.length){ box.innerHTML='<div class="hint">Sipariş kaydı bulunamadı.</div>'; return; }
+      const dealerIds=[...new Set(orders.map(o=>o.dealer_id).filter(Boolean))];
+      const orderIds=orders.map(o=>o.id).filter(Boolean);
+      let dealerMap={};
+      if(dealerIds.length){
+        const {data:dealers,error:dealerErr}=await sb.from('dealers').select('id,name').in('id',dealerIds);
+        if(dealerErr){ throw dealerErr; }
+        dealerMap=Object.fromEntries((dealers||[]).map(d=>[d.id,d.name]));
+      }
+      let items=[];
+      if(orderIds.length){
+        const {data:orderItems,error:itemErr}=await sb.from('order_items').select('order_id,product_id,qty').in('order_id',orderIds);
+        if(itemErr){ throw itemErr; }
+        items=orderItems||[];
+      }
+      const productIds=[...new Set(items.map(i=>i.product_id).filter(Boolean))];
+      let productMap={};
+      if(productIds.length){
+        const {data:products,error:productErr}=await sb.from('products').select('id,name').in('id',productIds);
+        if(productErr){ throw productErr; }
+        productMap=Object.fromEntries((products||[]).map(p=>[p.id,p.name]));
+      }
+      const itemsByOrder={};
+      for(const item of items){
+        if(!itemsByOrder[item.order_id]) itemsByOrder[item.order_id]=[];
+        itemsByOrder[item.order_id].push(item);
+      }
+      const rows=orders.map(o=>{
+        const bag=itemsByOrder[o.id]||[];
+        const toplamAdet=bag.reduce((sum,it)=>sum+(Number(it.qty)||0),0);
+        const urunler=bag.length?bag.map(it=>productMap[it.product_id]||it.product_id||'Ürün').join(', '):'-';
+        return {
+          'Sipariş No': o.id||'-',
+          'Kurum': o.school_name||dealerMap[o.dealer_id]||'-',
+          'Tarih': o.date||'-',
+          'Sezon': o.season||'-',
+          'Ürün(ler)': urunler,
+          'Adet': toplamAdet||0,
+          'Tutar': TL(Number(o.total||0)),
+          'Durum': o.status||'-',
+        };
+      });
+      const cols=['Sipariş No','Kurum','Tarih','Sezon','Ürün(ler)','Adet','Tutar','Durum'];
+      box.innerHTML=renderTbl(cols,rows);
+      return;
+    }catch(error){
+      box.innerHTML=`<div class="hint">⚠️ Gerçek bayi tabloları okunamadı: ${escapeHtml(error?.message||String(error))}</div>`;
+      return;
+    }
   }
   // demo
   const demoMus=[
