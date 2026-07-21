@@ -566,6 +566,109 @@ async function referansDataKaydet(){
   const res=await addRefRecords(parseRefInput(raw,tag));
   alert(res.msg);
 }
+let REF_PENDING_FILE=null;
+function handleRefFileSelect(el){
+  const f=el?.files?.[0]||null;
+  REF_PENDING_FILE=f;
+  const msg=document.getElementById('rRefFileMsg');
+  if(!msg) return;
+  msg.textContent=f?`Seçilen dosya: ${f.name} (${Math.max(1,Math.round((f.size||0)/1024))} KB)`:'';
+}
+function _readFileTextBestEffort(file){
+  return new Promise((resolve)=>{
+    if(!file){ resolve(''); return; }
+    const name=String(file.name||'').toLowerCase();
+    const typ=String(file.type||'').toLowerCase();
+    const textLike=typ.startsWith('text/') || name.endsWith('.csv') || name.endsWith('.txt') || name.endsWith('.json') || name.endsWith('.md');
+    if(!textLike){ resolve(''); return; }
+    const r=new FileReader();
+    r.onload=()=>resolve(String(r.result||''));
+    r.onerror=()=>resolve('');
+    r.readAsText(file);
+  });
+}
+let _sheetJsPromise=null;
+function ensureSheetJS(){
+  if(window.XLSX) return Promise.resolve(window.XLSX);
+  if(_sheetJsPromise) return _sheetJsPromise;
+  _sheetJsPromise=new Promise((resolve,reject)=>{
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload=()=>window.XLSX ? resolve(window.XLSX) : reject(new Error('SheetJS yüklendi ama XLSX bulunamadı.'));
+    s.onerror=()=>reject(new Error('SheetJS yüklenemedi.'));
+    document.head.appendChild(s);
+  });
+  return _sheetJsPromise;
+}
+async function _readExcelRowsAsText(file){
+  const XLSX=await ensureSheetJS();
+  const buf=await file.arrayBuffer();
+  const wb=XLSX.read(buf,{type:'array'});
+  const lines=[];
+  const MAX_TEXT=4200;
+  const MAX_ROWS=140;
+  const MAX_COLS=24;
+  let rowCount=0;
+  for(const sheetName of wb.SheetNames){
+    if(rowCount>=MAX_ROWS || lines.join('\n').length>=MAX_TEXT) break;
+    const ws=wb.Sheets[sheetName];
+    if(!ws) continue;
+    const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+    if(!rows.length) continue;
+    lines.push(`Sayfa: ${sheetName}`);
+    const header=(rows[0]||[]).map(v=>String(v||'').replace(/\s+/g,' ').trim()).filter(Boolean);
+    let startIdx=0;
+    if(header.length){
+      lines.push(`Kolonlar: ${header.join(' | ')}`);
+      startIdx=1;
+    }
+    for(let i=startIdx;i<rows.length;i++){
+      const cells=(rows[i]||[]).slice(0,MAX_COLS).map(v=>String(v||'').replace(/\s+/g,' ').trim()).filter(Boolean);
+      if(!cells.length) continue;
+      rowCount++;
+      lines.push(`Satır ${i+1}: ${cells.join(' | ')}`);
+      if(rowCount>=MAX_ROWS || lines.join('\n').length>=MAX_TEXT) break;
+    }
+  }
+  return lines.join('\n').slice(0,MAX_TEXT).trim();
+}
+async function referansDosyaKaydet(){
+  const f=REF_PENDING_FILE;
+  if(!f){ alert('Önce bir dosya seç.'); return; }
+  const tag=val('rRefTag');
+  const ext=String(f.name||'').toLowerCase();
+  const isExcel=ext.endsWith('.xlsx') || ext.endsWith('.xls');
+  let ozet='';
+  let parseNotu='';
+  if(isExcel){
+    try{
+      ozet=await _readExcelRowsAsText(f);
+      if(!ozet) parseNotu='Excel dosyası okundu ama içerik satırı bulunamadı.';
+    }catch(e){
+      parseNotu=`Excel içerik çıkarımı başarısız: ${e?.message||e}`;
+    }
+  }
+  if(!ozet){
+    const txt=await _readFileTextBestEffort(f);
+    ozet=txt ? txt.replace(/\s+/g,' ').trim().slice(0,2200) : '';
+  }
+  const satirlar=[
+    `Dosya: ${f.name}`,
+    `Tür: ${f.type||'bilinmiyor'}`,
+    `Boyut: ${Math.max(1,Math.round((f.size||0)/1024))} KB`,
+    ozet ? `İçerik özeti: ${ozet}` : 'İçerik özeti: (dosya metni otomatik çıkarılamadı)',
+    parseNotu ? `Not: ${parseNotu}` : ''
+  ];
+  const res=await addRefRecords([{content:satirlar.join(' | '),tag:refTagNorm(tag)}]);
+  alert(res.msg);
+  if(res.ok){
+    const inp=document.getElementById('rRefFile');
+    if(inp) inp.value='';
+    REF_PENDING_FILE=null;
+    const msg=document.getElementById('rRefFileMsg');
+    if(msg) msg.textContent='';
+  }
+}
 function shouldShowRefImportBtn(){
   return !!sb && localStorage.getItem(REF_IMPORT_DONE_KEY)!=='1' && loadRefDataLocal().length>0;
 }
@@ -1339,6 +1442,14 @@ let onSiparisler=[
   {bayi:'Minik Adımlar Anaokulu',urun:'STEM Seti (8\'li)',adet:35,durum:'Ön sipariş'},
 ];
 let onSiparisLookups={dealers:[],products:[]};
+function _isTeacherSetProductName(name){
+  const n=String(name||'').toLowerCase();
+  return n.includes('öğretmen') || n.includes('ogretmen') || n.includes('teacher');
+}
+function _isShippingProductName(name){
+  const n=String(name||'').toLowerCase();
+  return n.includes('kargo') || n.includes('shipping') || n.includes('cargo') || n.includes('freight');
+}
 function renderOnList(){
   const el=document.getElementById('oList'); if(!el) return;
   if(!onSiparisler.length){ el.innerHTML='<div class="hint">Henüz ön sipariş yok.</div>'; return; }
@@ -1352,7 +1463,9 @@ async function loadOnSiparisLookups(){
   const msgEl=document.getElementById('oMsg');
   if(!dealerSel || !productSel) return;
   if(!sb){
-    const products=loadPrices().map((p,i)=>({id:`local-${i}`,name:p.ad,default_price:Number(p.fiyat||0),isLocal:true}));
+    const products=loadPrices()
+      .map((p,i)=>({id:`local-${i}`,name:p.ad,default_price:Number(p.fiyat||0),isLocal:true}))
+      .filter(p=>!_isTeacherSetProductName(p.name));
     onSiparisLookups={dealers:[],products};
     dealerSel.innerHTML='<option value="">Supabase bağlantısı gerekli</option>';
     dealerSel.disabled=true;
@@ -1369,7 +1482,9 @@ async function loadOnSiparisLookups(){
     if(dRes.error) throw dRes.error;
     if(pRes.error) throw pRes.error;
     const dealers=(dRes.data||[]).map(d=>({...d,name:String(d.name||'').trim()})).filter(d=>d.id && d.name);
-    const products=(pRes.data||[]).map(p=>({...p,name:String(p.name||'').trim()})).filter(p=>p.id && p.name);
+    const products=(pRes.data||[])
+      .map(p=>({...p,name:String(p.name||'').trim()}))
+      .filter(p=>p.id && p.name && !_isTeacherSetProductName(p.name));
     onSiparisLookups={dealers,products};
     dealerSel.innerHTML='<option value="">Bayi seç</option>'+dealers.map(d=>`<option value="${d.id}">${escapeHtml(d.name)}${d.active===false?' (pasif)':''}</option>`).join('');
     dealerSel.disabled=!dealers.length;
@@ -1410,6 +1525,7 @@ async function addOnSiparis(){
   const notRaw=val('oNot').trim();
   if(!dealer){ msgEl.textContent='⚠️ Bayi seçimi zorunlu.'; return; }
   if(!urun){ msgEl.textContent='⚠️ Ürün seçimi zorunlu.'; return; }
+  if(_isTeacherSetProductName(urun)){ msgEl.textContent='⚠️ Öğretmen seti ön siparişte eklenmez.'; return; }
   if(adet<=0){ msgEl.textContent='⚠️ Adet 0’dan büyük olmalı.'; return; }
   let savedToSupabase=false;
   if(sb){
@@ -1444,7 +1560,7 @@ async function addOnSiparis(){
         pre_order_id:preOrderId,
         product_id:product.id,
         qty:adet,
-        unit_price:Number(product.default_price||0),
+        unit_price:_isShippingProductName(product.name) ? 0 : Number(product.default_price||0),
       }]);
       if(itemErr){
         const {error:rollbackErr}=await sb.from('pre_orders').delete().eq('id',preOrderId);
@@ -1486,12 +1602,20 @@ VIEWS.rapor = () => {
           <div class="fld"><label class="fl">Referans etiketi (opsiyonel)</label><input class="inp" id="rRefTag" placeholder="örn: okul / fiyat itirazı / curious box"></div>
           <div class="fld"><label class="fl">Raporda etiket filtresi (opsiyonel)</label><input class="inp" id="rRefFilterTag" placeholder="örn: fiyat itirazı"></div>
         </div>
-        <div class="fld"><label class="fl">Ada referans hafızası (kalıcı)</label><textarea class="ta" id="rRefData" placeholder="Müşteri notları / segment bilgileri / fiyatlama ipuçları / JSON kayıtları..."></textarea></div>
-        <button class="btn ghost wide" onclick="referansDataKaydet()">🧠 Referansı etiketiyle kaydet</button>
+        <div class="fld"><label class="fl">Ada referans notu (opsiyonel)</label><textarea class="ta" id="rRefData" placeholder="Kısa bir not eklemek istersen buraya yaz..."></textarea></div>
+        <button class="btn ghost wide" onclick="referansDataKaydet()">🧠 Notu referans havuzuna ekle</button>
+        <div class="fld">
+          <label class="fl">Referans dosyası yükle (Excel/PDF/CSV/Görsel)</label>
+          <label class="upload-zone" style="display:block;cursor:pointer">
+            <input id="rRefFile" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.json,image/*" style="display:none" onchange="handleRefFileSelect(this)">
+            <div style="font-size:22px;margin-bottom:6px">↑</div>
+            Dosyayı seç veya sürükle
+          </label>
+          <div id="rRefFileMsg" class="hint"></div>
+        </div>
+        <button class="btn ghost wide" onclick="referansDosyaKaydet()">📎 Dosyayı referans havuzuna ekle</button>
         <button class="btn ghost wide hide" id="rImportLocalBtn">☁️ Yerel referansları ortak havuza aktar (1 kez)</button>
         <div class="hint" id="rRefSyncMsg"></div>
-        <div class="fld"><label class="fl">Teklif JSON kütüphanesi (opsiyonel import)</label><textarea class="ta" id="rDataLib" placeholder='[{"createdAt":1762204800000,"kurum":"TED Koleji","yetkili":"Ayşe","mail":"ayse@ted.com","genelToplam":501564,"urunAdetToplam":240}]'></textarea></div>
-        <button class="btn ghost wide" id="rImportBtn">📥 JSON içeri aktar</button>
         <button class="btn wide" onclick="genRapor()">📊 Raporu oluştur</button>
       </div>
       <div class="card card-pad">
@@ -1507,17 +1631,8 @@ VIEWS.rapor = () => {
 };
 async function genRapor(){
   const tip=val('rTip'); const donem=val('rDonem'); const veri=val('rVeri');
-  const libRaw=val('rDataLib');
   const refFilterTag=val('rRefFilterTag');
   const refOzet=await buildRefDataOzet(25,refFilterTag);
-  const importBtn=document.getElementById('rImportBtn');
-  if(importBtn){
-    importBtn.onclick=()=>{
-      const r=importTeklifKutuphane(val('rDataLib'));
-      alert(r.msg);
-    };
-  }
-  if(libRaw){ importTeklifKutuphane(libRaw); }
   const metrikOzet=buildRaporMetrikOzeti(tip,donem);
   const out=document.getElementById('rOut'); out.classList.remove('empty'); out.textContent='Ada raporu hazırlıyor…';
   const sys=`Sen Ada'sın — Miniskop / Keşif Kutusu satış ekibinin asistanısın. Türkçe, kısa ve net bir SATIŞ RAPORU yaz.
